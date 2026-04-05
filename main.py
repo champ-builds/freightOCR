@@ -10,10 +10,11 @@ from urllib.parse import unquote
 
 import pandas as pd
 import pdfplumber
-from fastapi import FastAPI, Query, UploadFile, File
+from fastapi import FastAPI, Query, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -24,14 +25,13 @@ from openpyxl.utils import get_column_letter
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Freight Bill Extractor")
 
 # ---------------------------------------------------------------------------
-# CORS — expose custom header to browser JS
+# CORS
 # ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
@@ -42,14 +42,19 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# ✅ Serve frontend
+# Templates (FIXED)
 # ---------------------------------------------------------------------------
-app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 @app.get("/")
-def serve_frontend():
-    return FileResponse("templates/index.html")
+def serve_frontend(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
+# ---------------------------------------------------------------------------
+# Static (SAFE CHECK)
+# ---------------------------------------------------------------------------
+if Path("static").exists():
+    app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -69,7 +74,6 @@ NUMERIC_COLS = [
 ]
 
 DATE_COLS = ["Invoice Date", "Shipment Date"]
-
 
 # ---------------------------------------------------------------------------
 # PDF Extraction
@@ -124,18 +128,13 @@ def extract_freight_bill(pdf_path: str) -> pd.DataFrame:
 
     return df.reset_index(drop=True)
 
-
 # ---------------------------------------------------------------------------
 # Excel Writing
 # ---------------------------------------------------------------------------
 def sanitize_sheet_name(name: str) -> str:
-    invalid = r'[\\/*?:\[\]]'
-    name = re.sub(invalid, "_", name)
-    return name[:31]
-
+    return re.sub(r'[\\/*?:\[\]]', "_", name)[:31]
 
 def write_excel(results: dict[str, pd.DataFrame]) -> io.BytesIO:
-    logger.info(f"Building Excel workbook with {len(results)} sheet(s)")
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -145,14 +144,12 @@ def write_excel(results: dict[str, pd.DataFrame]) -> io.BytesIO:
     for sheet_name, df in results.items():
         ws = wb.create_sheet(title=sanitize_sheet_name(sheet_name))
 
-        # Headers
         for col_idx, col_name in enumerate(df.columns, start=1):
             cell = ws.cell(row=1, column=col_idx, value=col_name)
             cell.font = header_font
             cell.fill = header_fill
             cell.alignment = Alignment(horizontal="center")
 
-        # Data
         for row_idx, row in enumerate(df.itertuples(index=False), start=2):
             for col_idx, value in enumerate(row, start=1):
                 cell = ws.cell(row=row_idx, column=col_idx)
@@ -162,13 +159,11 @@ def write_excel(results: dict[str, pd.DataFrame]) -> io.BytesIO:
                 else:
                     cell.value = None if str(value) in ("nan", "NaT", "None") else value
 
-        # Column width
         for col_idx, col_name in enumerate(df.columns, start=1):
-            lengths = [len(str(col_name))]
-            for r in range(2, ws.max_row + 1):
-                val = ws.cell(row=r, column=col_idx).value
-                lengths.append(len(str(val or "")))
-            max_len = max(lengths) if lengths else 10
+            max_len = max(
+                [len(str(col_name))] +
+                [len(str(ws.cell(row=r, column=col_idx).value or "")) for r in range(2, ws.max_row + 1)]
+            )
             ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 4, 40)
 
         ws.freeze_panes = "A2"
@@ -177,7 +172,6 @@ def write_excel(results: dict[str, pd.DataFrame]) -> io.BytesIO:
     wb.save(output)
     output.seek(0)
     return output
-
 
 # ---------------------------------------------------------------------------
 # Core Processing
@@ -198,7 +192,6 @@ def process_pdf_files(pdf_files: list[Path]):
             })
 
     return extracted, successful, failed
-
 
 def build_response(extracted, successful, failed):
     if not extracted:
@@ -221,7 +214,6 @@ def build_response(extracted, successful, failed):
         },
     )
 
-
 # ---------------------------------------------------------------------------
 # Endpoint: Folder
 # ---------------------------------------------------------------------------
@@ -229,8 +221,6 @@ def build_response(extracted, successful, failed):
 def extract_pdfs(folder: str = Query(...)):
     try:
         folder = unquote(folder)
-        logger.info(f"Request received for folder: {folder}")
-
         folder_path = Path(folder)
 
         if not folder_path.exists():
@@ -245,9 +235,7 @@ def extract_pdfs(folder: str = Query(...)):
         return build_response(extracted, successful, failed)
 
     except Exception as e:
-        logger.error(traceback.format_exc())
         return JSONResponse(status_code=500, content={"error": str(e)})
-
 
 # ---------------------------------------------------------------------------
 # Endpoint: ZIP Upload
@@ -273,5 +261,4 @@ async def extract_zip(file: UploadFile = File(...)):
             return build_response(extracted, successful, failed)
 
     except Exception as e:
-        logger.error(traceback.format_exc())
         return JSONResponse(status_code=500, content={"error": str(e)})

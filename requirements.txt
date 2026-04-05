@@ -3,3 +3,5 @@ uvicorn[standard]
 pdfplumber
 pandas
 openpyxl
+python-multipart
+jinja2
