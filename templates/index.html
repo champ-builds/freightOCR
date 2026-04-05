@@ -64,6 +64,7 @@
                             <div class="spinner"></div>
                             <span class="processing-text" id="processingText">Preparing files<span class="processing-dots"></span></span>
                             <span class="processing-counter" id="processingCounter"></span>
+                            <button class="cancel-btn" id="cancelBtn">Cancel</button>
                         </div>
                         <div class="progress-track">
                             <div class="progress-fill" id="progressFill"></div>
@@ -142,6 +143,7 @@
         let blobURL = null;
         let parsedSheets = {};
         let sheetNames = [];
+        let abortController = null;
 
         /* ── Elements ── */
         const pageContainer = document.getElementById('pageContainer');
@@ -159,6 +161,7 @@
         const processingCounter = document.getElementById('processingCounter');
         const progressFill = document.getElementById('progressFill');
         const processingFilename = document.getElementById('processingFilename');
+        const cancelBtn = document.getElementById('cancelBtn');
         const backBtn = document.getElementById('backBtn');
         const downloadBtnLg = document.getElementById('downloadBtnLg');
         const sheetTabsEl = document.getElementById('sheetTabs');
@@ -297,6 +300,7 @@
             procBar.classList.add('visible');
             resetProgress();
             extractBtn.disabled = true;
+            abortController = new AbortController();
             if (blobURL) { URL.revokeObjectURL(blobURL); blobURL = null; }
 
             try {
@@ -319,6 +323,7 @@
                 const resp = await fetch(`${API_BASE}/extract-zip-stream`, {
                     method: 'POST',
                     body: formData,
+                    signal: abortController.signal,
                 });
 
                 if (!resp.ok) {
@@ -401,11 +406,28 @@
 
             } catch (err) {
                 procBar.classList.remove('visible');
-                toast('Connection Error', `Could not reach the server. Make sure it is running.`, 'error');
-                console.error(err);
+                if (err.name === 'AbortError') {
+                    // User cancelled — silently reset
+                } else {
+                    toast('Connection Error', `Could not reach the server. Make sure it is running.`, 'error');
+                    console.error(err);
+                }
             }
 
+            abortController = null;
             extractBtn.disabled = false;
+        });
+
+        /* ── Cancel button ── */
+        cancelBtn.addEventListener('click', () => {
+            if (abortController) {
+                abortController.abort();
+                abortController = null;
+            }
+            procBar.classList.remove('visible');
+            extractBtn.disabled = false;
+            resetProgress();
+            toast('Cancelled', 'Processing was cancelled.', 'warn');
         });
 
         /* ── Parse Excel blob using SheetJS ── */
