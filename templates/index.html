@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Freight Bill Extractor</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=DM+Mono:wght@300;400;500&family=EB+Garamond:ital,wght@0,400;0,600;1,400&display=swap"
+        rel="stylesheet" />
+    <link rel="stylesheet" href="/static/styles.css" />
+</head>
+
+<body>
+
+    <div class="page" id="pageContainer">
+        <!-- HEADER -->
+        <header>
+            <div class="header-rule">
+                <span class="header-tag">Logistics Intelligence</span>
+            </div>
+            <h1>Freight Bill<br />Extractor</h1>
+            <p class="subtitle">Upload a folder of PDF freight bills — receive a structured Excel workbook.</p>
+        </header>
+
+        <!-- MAIN -->
+        <main>
+
+            <!-- =============================================
+                 VIEW 1: UPLOAD
+                 ============================================= -->
+            <div class="view active" id="uploadView">
+                <div class="section-label fade-up">01 &mdash; Select Folder</div>
+
+                <div class="drop-zone fade-up" id="dropZone">
+                    <span class="dz-icon">&#128194;</span>
+                    <div class="dz-title">Drop your PDF folder here</div>
+                    <div class="dz-sub">or browse to select a local folder</div>
+                    <button class="dz-btn" onclick="document.getElementById('folder-input').click()">Browse
+                        Folder</button>
+                    <input type="file" id="folder-input" webkitdirectory multiple accept=".pdf" />
+                </div>
+
+                <div class="files-badge" id="filesBadge">
+                    <span class="files-badge-dot"></span>
+                    <span class="files-badge-text" id="badgeText">0 PDF files selected</span>
+                    <button class="files-badge-clear" id="clearBtn">Clear</button>
+                </div>
+
+                <!-- ACTION -->
+                <div class="action-row fade-up">
+                    <button class="extract-btn" id="extractBtn" disabled>
+                        <span class="btn-label">Extract Bills</span>
+                    </button>
+                </div>
+
+                <!-- PROCESSING -->
+                <div class="processing-bar" id="processingBar">
+                    <div class="spinner"></div>
+                    <span class="processing-text">Processing PDF files<span class="processing-dots"></span></span>
+                </div>
+            </div>
+
+            <!-- =============================================
+                 VIEW 2: RESULTS
+                 ============================================= -->
+            <div class="view" id="resultsView">
+
+                <!-- Top bar -->
+                <div class="results-topbar">
+                    <div class="results-topbar-left">
+                        <button class="back-btn" id="backBtn">&larr; New Extraction</button>
+                        <span class="results-summary-text" id="resultsSummaryText"></span>
+                    </div>
+                    <a class="download-btn-lg" id="downloadBtnLg" download="freight_bills.xlsx">
+                        <span class="download-icon">&#8595;</span>
+                        Download Excel
+                    </a>
+                </div>
+
+                <!-- Section: Data Preview -->
+                <div class="section-label">02 &mdash; Data Preview</div>
+
+                <!-- Sheet tabs -->
+                <div class="sheet-tabs" id="sheetTabs"></div>
+
+                <!-- Table -->
+                <div class="table-wrapper" id="tableWrapper"></div>
+                <div class="table-row-count" id="tableRowCount"></div>
+
+                <!-- Failed files -->
+                <div class="failed-panel" id="failedPanel" style="display:none;">
+                    <div class="failed-header">
+                        <span class="failed-header-icon">&#9888;</span>
+                        <span class="failed-header-title">Failed Extractions</span>
+                        <span class="failed-header-count" id="failedCount"></span>
+                    </div>
+                    <div class="failed-body">
+                        <ul class="failed-list" id="failedList"></ul>
+                    </div>
+                </div>
+
+            </div>
+
+        </main>
+
+        <!-- FOOTER -->
+        <footer>
+            <span class="footer-txt">Freight Bill Extractor &copy; 2026</span>
+            <div class="footer-line"></div>
+            <a href="mailto:sabarisrinivas004@gmail.com" class="footer-txt"
+                style="text-decoration:none;">sabarisrinivas004@gmail.com</a>
+        </footer>
+    </div>
+
+    <!-- TOAST CONTAINER -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script>
+        const API_BASE = 'http://localhost:8001';
+
+        /* ── State ── */
+        let selectedFiles = [];
+        let blobURL = null;
+        let parsedSheets = {};   // { sheetName: { headers: [], rows: [][] } }
+        let sheetNames = [];
+
+        /* ── Elements ── */
+        const pageContainer = document.getElementById('pageContainer');
+        const uploadView = document.getElementById('uploadView');
+        const resultsView = document.getElementById('resultsView');
+        const dropZone = document.getElementById('dropZone');
+        const folderInput = document.getElementById('folder-input');
+        const filesBadge = document.getElementById('filesBadge');
+        const badgeText = document.getElementById('badgeText');
+        const clearBtn = document.getElementById('clearBtn');
+        const extractBtn = document.getElementById('extractBtn');
+        const procBar = document.getElementById('processingBar');
+        const backBtn = document.getElementById('backBtn');
+        const downloadBtnLg = document.getElementById('downloadBtnLg');
+        const sheetTabsEl = document.getElementById('sheetTabs');
+        const tableWrapper = document.getElementById('tableWrapper');
+        const tableRowCount = document.getElementById('tableRowCount');
+        const resultsSummaryText = document.getElementById('resultsSummaryText');
+        const failedPanel = document.getElementById('failedPanel');
+        const failedList = document.getElementById('failedList');
+        const failedCount = document.getElementById('failedCount');
+
+        /* ── View switching ── */
+        function showView(viewId) {
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            const target = document.getElementById(viewId);
+            target.classList.add('active', 'view-enter');
+            setTimeout(() => target.classList.remove('view-enter'), 400);
+
+            if (viewId === 'resultsView') {
+                pageContainer.classList.add('results-mode');
+            } else {
+                pageContainer.classList.remove('results-mode');
+            }
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        /* ── Folder input ── */
+        folderInput.addEventListener('change', () => {
+            const pdfs = Array.from(folderInput.files).filter(f => f.name.toLowerCase().endsWith('.pdf'));
+            setFiles(pdfs, folderInput.files[0]?.webkitRelativePath?.split('/')[0] || 'folder');
+        });
+
+        function setFiles(pdfs, folderName) {
+            selectedFiles = pdfs;
+            if (pdfs.length === 0) {
+                filesBadge.classList.remove('visible');
+                extractBtn.disabled = true;
+                return;
+            }
+            badgeText.textContent = `${pdfs.length} PDF file${pdfs.length > 1 ? 's' : ''} selected from "${folderName}"`;
+            filesBadge.classList.add('visible');
+            extractBtn.disabled = false;
+        }
+
+        clearBtn.addEventListener('click', () => {
+            selectedFiles = [];
+            folderInput.value = '';
+            filesBadge.classList.remove('visible');
+            extractBtn.disabled = true;
+            if (blobURL) { URL.revokeObjectURL(blobURL); blobURL = null; }
+        });
+
+        /* ── Back button ── */
+        backBtn.addEventListener('click', () => {
+            showView('uploadView');
+            if (blobURL) { URL.revokeObjectURL(blobURL); blobURL = null; }
+            parsedSheets = {};
+            sheetNames = [];
+            selectedFiles = [];
+            folderInput.value = '';
+            filesBadge.classList.remove('visible');
+            extractBtn.disabled = true;
+        });
+
+        /* ── Drag & Drop ── */
+        dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+        dropZone.addEventListener('drop', e => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            toast('Note', 'For folder drag-drop, please use the Browse button due to browser security restrictions.', 'warn');
+        });
+
+        /* ── Extract ── */
+        extractBtn.addEventListener('click', async () => {
+            if (!selectedFiles.length) return;
+
+            procBar.classList.add('visible');
+            extractBtn.disabled = true;
+            if (blobURL) { URL.revokeObjectURL(blobURL); blobURL = null; }
+
+            try {
+                // Build a ZIP in-browser from selected files and POST to /extract-zip
+                const zip = await buildZip(selectedFiles);
+                const formData = new FormData();
+                formData.append('file', zip, 'upload.zip');
+
+                const resp = await fetch(`${API_BASE}/extract-zip`, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                procBar.classList.remove('visible');
+
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({ error: 'Unknown server error' }));
+                    toast('Server Error', err.error || `HTTP ${resp.status}`, 'error');
+                    extractBtn.disabled = false;
+                    return;
+                }
+
+                // Parse summary from response header
+                let successful = [], failed = [];
+                const summaryHeader = resp.headers.get('X-Extraction-Summary');
+                if (summaryHeader) {
+                    try {
+                        const s = JSON.parse(summaryHeader);
+                        successful = s.successful || [];
+                        failed = s.failed || [];
+                    } catch (_) { }
+                }
+
+                // Get blob for download
+                const blob = await resp.blob();
+                blobURL = URL.createObjectURL(blob);
+                downloadBtnLg.href = blobURL;
+
+                // Parse Excel into table data
+                await parseExcelBlob(blob);
+
+                // Build results UI
+                buildResultsUI(successful, failed, blob.size);
+
+                // Switch to results view
+                showView('resultsView');
+
+            } catch (err) {
+                procBar.classList.remove('visible');
+                toast('Connection Error', `Could not reach the API server at ${API_BASE}. Make sure it is running.`, 'error');
+                console.error(err);
+            }
+
+            extractBtn.disabled = false;
+        });
+
+        /* ── Parse Excel blob using SheetJS ── */
+        async function parseExcelBlob(blob) {
+            if (!window.XLSX) {
+                await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+            }
+
+            const arrayBuf = await blob.arrayBuffer();
+            const workbook = XLSX.read(arrayBuf, { type: 'array' });
+
+            parsedSheets = {};
+            sheetNames = workbook.SheetNames;
+
+            for (const name of sheetNames) {
+                const sheet = workbook.Sheets[name];
+                const jsonData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+
+                if (jsonData.length > 0) {
+                    parsedSheets[name] = {
+                        headers: jsonData[0],
+                        rows: jsonData.slice(1),
+                    };
+                } else {
+                    parsedSheets[name] = { headers: [], rows: [] };
+                }
+            }
+        }
+
+        /* ── Build the results UI ── */
+        function buildResultsUI(successful, failed, fileSize) {
+            // Summary text
+            const totalFiles = successful.length + failed.length;
+            const sizeKB = (fileSize / 1024).toFixed(1);
+            resultsSummaryText.textContent = `${successful.length} extracted · ${failed.length} failed · ${sizeKB} KB`;
+
+            // Sheet tabs
+            sheetTabsEl.innerHTML = '';
+            sheetNames.forEach((name, idx) => {
+                const tab = document.createElement('button');
+                tab.className = 'sheet-tab' + (idx === 0 ? ' active' : '');
+                tab.textContent = name;
+                tab.addEventListener('click', () => {
+                    document.querySelectorAll('.sheet-tab').forEach(t => t.classList.remove('active'));
+                    tab.classList.add('active');
+                    renderTable(name);
+                });
+                sheetTabsEl.appendChild(tab);
+            });
+
+            // Render first sheet
+            if (sheetNames.length > 0) {
+                renderTable(sheetNames[0]);
+            }
+
+            // Failed files
+            if (failed.length > 0) {
+                failedPanel.style.display = 'block';
+                failedCount.textContent = `${failed.length} file${failed.length > 1 ? 's' : ''}`;
+                failedList.innerHTML = '';
+                failed.forEach(f => {
+                    const li = document.createElement('li');
+                    li.innerHTML = `
+                        <span class="failed-file-icon">&#10007;</span>
+                        <div>
+                            <div class="failed-file-name">${escHtml(f.file)}</div>
+                            <div class="failed-file-reason">${escHtml(f.reason || 'Unknown error')}</div>
+                        </div>
+                    `;
+                    failedList.appendChild(li);
+                });
+            } else {
+                failedPanel.style.display = 'none';
+            }
+        }
+
+        /* ── Render a sheet's data into the table ── */
+        function renderTable(sheetName) {
+            const data = parsedSheets[sheetName];
+            if (!data) return;
+
+            let html = '<table class="data-table"><thead><tr>';
+            // Row number column
+            html += '<th>#</th>';
+            data.headers.forEach(h => {
+                html += `<th>${escHtml(String(h))}</th>`;
+            });
+            html += '</tr></thead><tbody>';
+
+            data.rows.forEach((row, rowIdx) => {
+                html += '<tr>';
+                html += `<td style="color:var(--gray-500);text-align:center;">${rowIdx + 1}</td>`;
+                row.forEach(cell => {
+                    const val = cell === null || cell === undefined ? '' : String(cell);
+                    html += `<td>${escHtml(val)}</td>`;
+                });
+                // Pad if row is shorter than headers
+                for (let i = row.length; i < data.headers.length; i++) {
+                    html += '<td></td>';
+                }
+                html += '</tr>';
+            });
+
+            html += '</tbody></table>';
+            tableWrapper.innerHTML = html;
+            tableRowCount.textContent = `${data.rows.length} row${data.rows.length !== 1 ? 's' : ''} · ${data.headers.length} columns · Sheet: ${sheetName}`;
+        }
+
+        /* ── Build ZIP in-browser ── */
+        async function buildZip(files) {
+            if (!window.JSZip) {
+                await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
+            }
+            const zip = new window.JSZip();
+            for (const file of files) {
+                const buf = await file.arrayBuffer();
+                zip.file(file.name, buf);
+            }
+            return zip.generateAsync({ type: 'blob' });
+        }
+
+        function loadScript(src) {
+            return new Promise((res, rej) => {
+                const s = document.createElement('script');
+                s.src = src; s.onload = res; s.onerror = rej;
+                document.head.appendChild(s);
+            });
+        }
+
+        /* ── Toast ── */
+        function toast(title, msg, type = 'warn') {
+            const container = document.getElementById('toastContainer');
+            const el = document.createElement('div');
+            el.className = `toast ${type}`;
+            el.innerHTML = `
+                <div class="toast-title">${escHtml(title)}</div>
+                <div class="toast-msg">${escHtml(msg)}</div>
+                <button class="toast-close" onclick="dismissToast(this.parentElement)">&#215;</button>
+            `;
+            container.appendChild(el);
+            setTimeout(() => dismissToast(el), 7000);
+        }
+
+        function dismissToast(el) {
+            if (!el || !el.parentElement) return;
+            el.style.animation = 'slideOut 0.3s ease forwards';
+            setTimeout(() => el.remove(), 300);
+        }
+
+        function escHtml(str) {
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+    </script>
+</body>
+
+</html>
