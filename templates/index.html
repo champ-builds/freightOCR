@@ -30,15 +30,18 @@
                  VIEW 1: UPLOAD
                  ============================================= -->
             <div class="view active" id="uploadView">
-                <div class="section-label fade-up">01 &mdash; Select Folder</div>
+                <div class="section-label fade-up">01 &mdash; Select Files</div>
 
                 <div class="drop-zone fade-up" id="dropZone">
                     <span class="dz-icon">&#128194;</span>
-                    <div class="dz-title">Drop your PDF folder here</div>
-                    <div class="dz-sub">or browse to select a local folder</div>
-                    <button class="dz-btn" onclick="document.getElementById('folder-input').click()">Browse
-                        Folder</button>
+                    <div class="dz-title">Upload your PDF freight bills</div>
+                    <div class="dz-sub">Select a folder of PDFs or upload a ZIP archive</div>
+                    <div class="dz-buttons">
+                        <button class="dz-btn" onclick="document.getElementById('folder-input').click()">&#128193; Browse Folder</button>
+                        <button class="dz-btn dz-btn-alt" onclick="document.getElementById('zip-input').click()">&#128230; Upload ZIP</button>
+                    </div>
                     <input type="file" id="folder-input" webkitdirectory multiple accept=".pdf" />
+                    <input type="file" id="zip-input" accept=".zip" />
                 </div>
 
                 <div class="files-badge" id="filesBadge">
@@ -56,8 +59,17 @@
 
                 <!-- PROCESSING -->
                 <div class="processing-bar" id="processingBar">
-                    <div class="spinner"></div>
-                    <span class="processing-text">Processing PDF files<span class="processing-dots"></span></span>
+                    <div class="processing-content">
+                        <div class="processing-top">
+                            <div class="spinner"></div>
+                            <span class="processing-text" id="processingText">Preparing files<span class="processing-dots"></span></span>
+                            <span class="processing-counter" id="processingCounter"></span>
+                        </div>
+                        <div class="progress-track">
+                            <div class="progress-fill" id="progressFill"></div>
+                        </div>
+                        <div class="processing-filename" id="processingFilename"></div>
+                    </div>
                 </div>
             </div>
 
@@ -124,9 +136,11 @@
         const API_BASE = window.location.origin;
 
         /* ── State ── */
-        let selectedFiles = [];
+        let selectedFiles = [];     // Array of File objects (from folder)
+        let selectedZipFile = null; // Single File object (from ZIP input)
+        let uploadMode = 'folder';  // 'folder' or 'zip'
         let blobURL = null;
-        let parsedSheets = {};   // { sheetName: { headers: [], rows: [][] } }
+        let parsedSheets = {};
         let sheetNames = [];
 
         /* ── Elements ── */
@@ -135,11 +149,16 @@
         const resultsView = document.getElementById('resultsView');
         const dropZone = document.getElementById('dropZone');
         const folderInput = document.getElementById('folder-input');
+        const zipInput = document.getElementById('zip-input');
         const filesBadge = document.getElementById('filesBadge');
         const badgeText = document.getElementById('badgeText');
         const clearBtn = document.getElementById('clearBtn');
         const extractBtn = document.getElementById('extractBtn');
         const procBar = document.getElementById('processingBar');
+        const processingText = document.getElementById('processingText');
+        const processingCounter = document.getElementById('processingCounter');
+        const progressFill = document.getElementById('progressFill');
+        const processingFilename = document.getElementById('processingFilename');
         const backBtn = document.getElementById('backBtn');
         const downloadBtnLg = document.getElementById('downloadBtnLg');
         const sheetTabsEl = document.getElementById('sheetTabs');
@@ -168,24 +187,44 @@
         /* ── Folder input ── */
         folderInput.addEventListener('change', () => {
             const pdfs = Array.from(folderInput.files).filter(f => f.name.toLowerCase().endsWith('.pdf'));
-            setFiles(pdfs, folderInput.files[0]?.webkitRelativePath?.split('/')[0] || 'folder');
-        });
-
-        function setFiles(pdfs, folderName) {
-            selectedFiles = pdfs;
             if (pdfs.length === 0) {
-                filesBadge.classList.remove('visible');
-                extractBtn.disabled = true;
+                toast('No PDFs', 'The selected folder does not contain any PDF files.', 'warn');
                 return;
             }
-            badgeText.textContent = `${pdfs.length} PDF file${pdfs.length > 1 ? 's' : ''} selected from "${folderName}"`;
+            uploadMode = 'folder';
+            selectedFiles = pdfs;
+            selectedZipFile = null;
+            zipInput.value = '';
+            const folderName = folderInput.files[0]?.webkitRelativePath?.split('/')[0] || 'folder';
+            badgeText.textContent = `${pdfs.length} PDF file${pdfs.length > 1 ? 's' : ''} from "${folderName}"`;
             filesBadge.classList.add('visible');
             extractBtn.disabled = false;
-        }
+        });
 
-        clearBtn.addEventListener('click', () => {
+        /* ── ZIP input ── */
+        zipInput.addEventListener('change', () => {
+            const file = zipInput.files[0];
+            if (!file) return;
+            if (!file.name.toLowerCase().endsWith('.zip')) {
+                toast('Invalid File', 'Please select a .zip file.', 'warn');
+                zipInput.value = '';
+                return;
+            }
+            uploadMode = 'zip';
+            selectedZipFile = file;
             selectedFiles = [];
             folderInput.value = '';
+            badgeText.textContent = `ZIP archive: "${file.name}" (${(file.size / 1024).toFixed(1)} KB)`;
+            filesBadge.classList.add('visible');
+            extractBtn.disabled = false;
+        });
+
+        /* ── Clear ── */
+        clearBtn.addEventListener('click', () => {
+            selectedFiles = [];
+            selectedZipFile = null;
+            folderInput.value = '';
+            zipInput.value = '';
             filesBadge.classList.remove('visible');
             extractBtn.disabled = true;
             if (blobURL) { URL.revokeObjectURL(blobURL); blobURL = null; }
@@ -198,7 +237,9 @@
             parsedSheets = {};
             sheetNames = [];
             selectedFiles = [];
+            selectedZipFile = null;
             folderInput.value = '';
+            zipInput.value = '';
             filesBadge.classList.remove('visible');
             extractBtn.disabled = true;
         });
@@ -209,50 +250,143 @@
         dropZone.addEventListener('drop', e => {
             e.preventDefault();
             dropZone.classList.remove('dragover');
-            toast('Note', 'For folder drag-drop, please use the Browse button due to browser security restrictions.', 'warn');
+
+            // Check if a ZIP file was dropped
+            const files = Array.from(e.dataTransfer.files);
+            const zipFile = files.find(f => f.name.toLowerCase().endsWith('.zip'));
+            if (zipFile) {
+                uploadMode = 'zip';
+                selectedZipFile = zipFile;
+                selectedFiles = [];
+                folderInput.value = '';
+                badgeText.textContent = `ZIP archive: "${zipFile.name}" (${(zipFile.size / 1024).toFixed(1)} KB)`;
+                filesBadge.classList.add('visible');
+                extractBtn.disabled = false;
+                return;
+            }
+
+            toast('Note', 'For folder upload, use the Browse Folder button. You can drag & drop ZIP files directly.', 'warn');
         });
+
+        /* ── Progress helpers ── */
+        function showProgress(text, current, total, filename) {
+            processingText.innerHTML = text + '<span class="processing-dots"></span>';
+            if (total > 0) {
+                processingCounter.textContent = `${current}/${total}`;
+                const pct = Math.round((current / total) * 100);
+                progressFill.style.width = pct + '%';
+            } else {
+                processingCounter.textContent = '';
+                progressFill.style.width = '0%';
+            }
+            processingFilename.textContent = filename || '';
+        }
+
+        function resetProgress() {
+            processingCounter.textContent = '';
+            progressFill.style.width = '0%';
+            processingFilename.textContent = '';
+            processingText.innerHTML = 'Preparing files<span class="processing-dots"></span>';
+        }
 
         /* ── Extract ── */
         extractBtn.addEventListener('click', async () => {
-            if (!selectedFiles.length) return;
+            if (uploadMode === 'folder' && !selectedFiles.length) return;
+            if (uploadMode === 'zip' && !selectedZipFile) return;
 
             procBar.classList.add('visible');
+            resetProgress();
             extractBtn.disabled = true;
             if (blobURL) { URL.revokeObjectURL(blobURL); blobURL = null; }
 
             try {
-                // Build a ZIP in-browser from selected files and POST to /extract-zip
-                const zip = await buildZip(selectedFiles);
-                const formData = new FormData();
-                formData.append('file', zip, 'upload.zip');
+                // Build or use the ZIP blob
+                let zipBlob;
+                if (uploadMode === 'zip') {
+                    zipBlob = selectedZipFile;
+                    showProgress('Uploading ZIP', 0, 0, selectedZipFile.name);
+                } else {
+                    showProgress('Packaging files', 0, 0, '');
+                    zipBlob = await buildZip(selectedFiles);
+                }
 
-                const resp = await fetch(`${API_BASE}/extract-zip`, {
+                // POST to SSE streaming endpoint
+                const formData = new FormData();
+                formData.append('file', zipBlob, uploadMode === 'zip' ? selectedZipFile.name : 'upload.zip');
+
+                showProgress('Uploading to server', 0, 0, '');
+
+                const resp = await fetch(`${API_BASE}/extract-zip-stream`, {
                     method: 'POST',
                     body: formData,
                 });
 
-                procBar.classList.remove('visible');
-
                 if (!resp.ok) {
+                    procBar.classList.remove('visible');
                     const err = await resp.json().catch(() => ({ error: 'Unknown server error' }));
                     toast('Server Error', err.error || `HTTP ${resp.status}`, 'error');
                     extractBtn.disabled = false;
                     return;
                 }
 
-                // Parse summary from response header
-                let successful = [], failed = [];
-                const summaryHeader = resp.headers.get('X-Extraction-Summary');
-                if (summaryHeader) {
-                    try {
-                        const s = JSON.parse(summaryHeader);
-                        successful = s.successful || [];
-                        failed = s.failed || [];
-                    } catch (_) { }
+                // Read SSE stream
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let finalData = null;
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+
+                    // Parse SSE events from buffer
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); // keep incomplete line in buffer
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        try {
+                            const event = JSON.parse(line.slice(6));
+
+                            if (event.type === 'progress') {
+                                showProgress(
+                                    'Processing PDFs',
+                                    event.current,
+                                    event.total,
+                                    event.file
+                                );
+                            } else if (event.type === 'complete') {
+                                finalData = event;
+                            } else if (event.type === 'error') {
+                                procBar.classList.remove('visible');
+                                toast('Extraction Error', event.message, 'error');
+                                extractBtn.disabled = false;
+                                return;
+                            }
+                        } catch (_) { }
+                    }
                 }
 
-                // Get blob for download
-                const blob = await resp.blob();
+                procBar.classList.remove('visible');
+
+                if (!finalData) {
+                    toast('Error', 'No response received from server.', 'error');
+                    extractBtn.disabled = false;
+                    return;
+                }
+
+                // Download Excel from the server using download_id
+                showProgress('Generating Excel', 0, 0, '');
+                const excelResp = await fetch(`${API_BASE}/download/${finalData.download_id}`);
+                if (!excelResp.ok) {
+                    toast('Download Error', 'Failed to retrieve the Excel file.', 'error');
+                    extractBtn.disabled = false;
+                    return;
+                }
+
+                const blob = await excelResp.blob();
                 blobURL = URL.createObjectURL(blob);
                 downloadBtnLg.href = blobURL;
 
@@ -260,14 +394,14 @@
                 await parseExcelBlob(blob);
 
                 // Build results UI
-                buildResultsUI(successful, failed, blob.size);
+                buildResultsUI(finalData.successful || [], finalData.failed || [], blob.size);
 
                 // Switch to results view
                 showView('resultsView');
 
             } catch (err) {
                 procBar.classList.remove('visible');
-                toast('Connection Error', `Could not reach the API server at ${API_BASE}. Make sure it is running.`, 'error');
+                toast('Connection Error', `Could not reach the server. Make sure it is running.`, 'error');
                 console.error(err);
             }
 
@@ -303,8 +437,6 @@
 
         /* ── Build the results UI ── */
         function buildResultsUI(successful, failed, fileSize) {
-            // Summary text
-            const totalFiles = successful.length + failed.length;
             const sizeKB = (fileSize / 1024).toFixed(1);
             resultsSummaryText.textContent = `${successful.length} extracted · ${failed.length} failed · ${sizeKB} KB`;
 
@@ -322,7 +454,6 @@
                 sheetTabsEl.appendChild(tab);
             });
 
-            // Render first sheet
             if (sheetNames.length > 0) {
                 renderTable(sheetNames[0]);
             }
@@ -354,7 +485,6 @@
             if (!data) return;
 
             let html = '<table class="data-table"><thead><tr>';
-            // Row number column
             html += '<th>#</th>';
             data.headers.forEach(h => {
                 html += `<th>${escHtml(String(h))}</th>`;
@@ -368,7 +498,6 @@
                     const val = cell === null || cell === undefined ? '' : String(cell);
                     html += `<td>${escHtml(val)}</td>`;
                 });
-                // Pad if row is shorter than headers
                 for (let i = row.length; i < data.headers.length; i++) {
                     html += '<td></td>';
                 }

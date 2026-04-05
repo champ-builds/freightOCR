@@ -1,9 +1,11 @@
+import asyncio
 import io
 import json
 import logging
 import re
 import tempfile
 import traceback
+import uuid as uuid_module
 import zipfile
 from pathlib import Path
 from urllib.parse import unquote
@@ -280,3 +282,92 @@ async def extract_zip(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(traceback.format_exc())
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Endpoint: ZIP Upload with SSE Progress Streaming
+# ---------------------------------------------------------------------------
+_excel_store: dict[str, bytes] = {}
+
+
+@app.post("/extract-zip-stream")
+async def extract_zip_stream(file: UploadFile = File(...)):
+    if not file.filename.endswith(".zip"):
+        return JSONResponse(status_code=400, content={"error": "Upload a ZIP file"})
+
+    zip_bytes = await file.read()
+
+    if not zipfile.is_zipfile(io.BytesIO(zip_bytes)):
+        return JSONResponse(status_code=400, content={"error": "Invalid ZIP archive"})
+
+    async def event_stream():
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                    zf.extractall(tmpdir)
+
+                pdf_files = sorted(Path(tmpdir).rglob("*.pdf"))
+                total = len(pdf_files)
+
+                if total == 0:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'No PDFs found in ZIP'})}\n\n"
+                    return
+
+                successful, failed, extracted = [], [], {}
+
+                for idx, pdf_file in enumerate(pdf_files, start=1):
+                    # Send progress event BEFORE processing
+                    yield f"data: {json.dumps({'type': 'progress', 'current': idx, 'total': total, 'file': pdf_file.name})}\n\n"
+                    await asyncio.sleep(0.01)  # flush the event
+
+                    try:
+                        df = await asyncio.to_thread(
+                            extract_freight_bill, str(pdf_file)
+                        )
+                        extracted[pdf_file.stem] = df
+                        successful.append(pdf_file.stem)
+                    except Exception as exc:
+                        failed.append({
+                            "file": pdf_file.name,
+                            "reason": str(exc),
+                        })
+
+                if not extracted:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'No PDFs could be extracted', 'failed': failed})}\n\n"
+                    return
+
+                # Generate Excel and store for download
+                excel_buf = write_excel(extracted)
+                download_id = str(uuid_module.uuid4())
+                _excel_store[download_id] = excel_buf.getvalue()
+
+                yield f"data: {json.dumps({'type': 'complete', 'download_id': download_id, 'successful': successful, 'failed': failed})}\n\n"
+
+        except Exception as e:
+            logger.error(traceback.format_exc())
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Endpoint: Download Excel by ID
+# ---------------------------------------------------------------------------
+@app.get("/download/{download_id}")
+def download_excel(download_id: str):
+    if download_id not in _excel_store:
+        return JSONResponse(status_code=404, content={"error": "Download not found or expired"})
+
+    excel_bytes = _excel_store.pop(download_id)
+    return StreamingResponse(
+        io.BytesIO(excel_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=freight_bills.xlsx"},
+    )
